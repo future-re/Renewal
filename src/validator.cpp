@@ -6,7 +6,7 @@
 #include <functional>
 #include <iostream>
 #include <optional>
-#include <regex>
+#include <re2/re2.h>
 #include <set>
 #include <sstream>
 #include <string>
@@ -30,13 +30,13 @@ struct PackageBundle {
 };
 
 bool is_valid_package_name(const std::string& name) {
-  static const std::regex pattern("^[A-Za-z0-9_-]+$");
-  return std::regex_match(name, pattern);
+  static const RE2 pattern("^[A-Za-z0-9_-]+$");
+  return RE2::FullMatch(name, pattern);
 }
 
 bool is_valid_semver(const std::string& version) {
-  static const std::regex pattern("^[0-9]+\\.[0-9]+\\.[0-9]+$");
-  return std::regex_match(version, pattern);
+  static const RE2 pattern("^[0-9]+\\.[0-9]+\\.[0-9]+$");
+  return RE2::FullMatch(version, pattern);
 }
 
 std::string dependency_key_from_import(const std::string& imported) {
@@ -73,13 +73,14 @@ std::vector<fs::path> collect_sources_to_scan(const fs::path& package_root,
 
 std::vector<std::string> collect_imports(const std::string& source) {
   std::vector<std::string> imports;
-  static const std::regex import_pattern(
+  static const RE2 import_pattern(
       R"(\bimport\s+([:<"][^;]+|[A-Za-z_][A-Za-z0-9_.:-]*)\s*;)");
 
-  for (std::sregex_iterator it(source.begin(), source.end(), import_pattern),
-       end;
-       it != end; ++it) {
-    imports.push_back(utils::trim((*it)[1].str()));
+  re2::StringPiece input(source);
+  std::string imported;
+
+  while (RE2::FindAndConsume(&input, import_pattern, &imported)) {
+    imports.push_back(utils::trim(imported));
   }
 
   return imports;
@@ -252,7 +253,8 @@ std::vector<Diagnostic> validate_package(
     return diagnostics;
   }
 
-  const fs::path module_root = package_root / "modules" / *manifest.package.name;
+  const fs::path module_root =
+      package_root / "modules" / *manifest.package.name;
   const fs::path unified_module = module_root / "mod.cppm";
   if (!fs::exists(unified_module)) {
     diagnostics.push_back(
@@ -281,22 +283,22 @@ std::vector<Diagnostic> validate_package(
     }
 
     if (!fs::exists(source_path)) {
-      diagnostics.push_back(
-          {DiagnosticSeverity::Error,
-           "build.sources entry does not exist: " + source, manifest_path});
+      diagnostics.push_back({DiagnosticSeverity::Error,
+                             "build.sources entry does not exist: " + source,
+                             manifest_path});
     }
   }
 
   const std::string unified_source = utils::read_file(unified_module);
-  static const std::regex export_module_pattern(
+  static const RE2 export_module_pattern(
       R"(export\s+module\s+([A-Za-z0-9_.:-]+)\s*;)");
-  std::smatch export_match;
-  if (!std::regex_search(unified_source, export_match, export_module_pattern)) {
+  std::string export_name;
+  if (!RE2::PartialMatch(unified_source, export_module_pattern, &export_name)) {
     diagnostics.push_back(
         {DiagnosticSeverity::Error,
          "mod.cppm must contain 'export module <package.name>;'",
          unified_module});
-  } else if (utils::trim(export_match[1].str()) != *manifest.package.name) {
+  } else if (utils::trim(export_name) != *manifest.package.name) {
     diagnostics.push_back({DiagnosticSeverity::Error,
                            "export module declaration must match package.name",
                            unified_module});
@@ -312,8 +314,7 @@ std::vector<Diagnostic> validate_package(
       if (!imported.empty() &&
           (imported.front() == '"' || imported.front() == '<')) {
         diagnostics.push_back({DiagnosticSeverity::Error,
-                               "Header units are forbidden in v0.1",
-                               file});
+                               "Header units are forbidden in v0.1", file});
         continue;
       }
 
@@ -372,16 +373,16 @@ std::expected<void, std::string> validator(const fs::path& package_root) {
       const auto [it, inserted] =
           package_names.emplace(*package.manifest.package.name, package.root);
       if (!inserted) {
-        diagnostics.push_back(
-            {DiagnosticSeverity::Error,
-             "Duplicate package.name '" + *package.manifest.package.name +
-                 "' found in workspace",
-             package.root / "pkg.toml"});
-        diagnostics.push_back(
-            {DiagnosticSeverity::Error,
-             "First package.name '" + *package.manifest.package.name +
-                 "' defined here",
-             it->second / "pkg.toml"});
+        diagnostics.push_back({DiagnosticSeverity::Error,
+                               "Duplicate package.name '" +
+                                   *package.manifest.package.name +
+                                   "' found in workspace",
+                               package.root / "pkg.toml"});
+        diagnostics.push_back({DiagnosticSeverity::Error,
+                               "First package.name '" +
+                                   *package.manifest.package.name +
+                                   "' defined here",
+                               it->second / "pkg.toml"});
       }
     }
 
@@ -389,16 +390,16 @@ std::expected<void, std::string> validator(const fs::path& package_root) {
       const auto [it, inserted] =
           target_names.emplace(*package.manifest.build.target, package.root);
       if (!inserted) {
-        diagnostics.push_back(
-            {DiagnosticSeverity::Error,
-             "Duplicate build.target '" + *package.manifest.build.target +
-                 "' found in workspace",
-             package.root / "pkg.toml"});
-        diagnostics.push_back(
-            {DiagnosticSeverity::Error,
-             "First build.target '" + *package.manifest.build.target +
-                 "' defined here",
-             it->second / "pkg.toml"});
+        diagnostics.push_back({DiagnosticSeverity::Error,
+                               "Duplicate build.target '" +
+                                   *package.manifest.build.target +
+                                   "' found in workspace",
+                               package.root / "pkg.toml"});
+        diagnostics.push_back({DiagnosticSeverity::Error,
+                               "First build.target '" +
+                                   *package.manifest.build.target +
+                                   "' defined here",
+                               it->second / "pkg.toml"});
       }
     }
   }
@@ -426,9 +427,9 @@ std::expected<void, std::string> validator(const fs::path& package_root) {
   }
 
   if (auto cycle = detect_cycle(dependency_graph)) {
-    diagnostics.push_back(
-        {DiagnosticSeverity::Error,
-         "Cyclic package dependency detected: " + *cycle, package_root});
+    diagnostics.push_back({DiagnosticSeverity::Error,
+                           "Cyclic package dependency detected: " + *cycle,
+                           package_root});
   }
 
   if (!diagnostics.empty()) {

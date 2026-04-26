@@ -5,7 +5,7 @@
 #include <cstdlib>
 #include <expected>
 #include <optional>
-#include <regex>
+#include <re2/re2.h>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -72,8 +72,8 @@ std::expected<std::string, std::string> capture_command(
 
   std::array<char, 4096> buffer{};
   std::string output;
-  while (std::fgets(buffer.data(),
-                    static_cast<int>(buffer.size()), pipe) != nullptr) {
+  while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) !=
+         nullptr) {
     output += buffer.data();
   }
 
@@ -85,12 +85,11 @@ std::expected<std::string, std::string> capture_command(
 }
 
 std::optional<int> first_version_component(const std::string& text) {
-  static const std::regex version_pattern(R"((\d+)(?:\.\d+)*)");
-  std::smatch match;
-  if (!std::regex_search(text, match, version_pattern)) {
+  std::string version;
+  if (!RE2::PartialMatch(text, R"((\d+)(?:\.\d+)*)", &version)) {
     return std::nullopt;
   }
-  return std::stoi(match[1].str());
+  return std::stoi(version);
 }
 
 std::expected<ToolchainInfo, std::string> describe_compiler(
@@ -98,8 +97,7 @@ std::expected<ToolchainInfo, std::string> describe_compiler(
   auto version_output =
       capture_command(shell_quote(executable) + " --version 2>&1");
   if (!version_output) {
-    version_output =
-        capture_command(shell_quote(executable) + " /? 2>&1");
+    version_output = capture_command(shell_quote(executable) + " /? 2>&1");
     if (!version_output) {
       return std::unexpected("Failed to inspect compiler: " + executable);
     }
@@ -180,14 +178,16 @@ std::expected<ToolchainInfo, std::string> validate_toolchain(
     case ToolchainFamily::Msvc:
       if (!info.major_version || *info.major_version < 19) {
         return std::unexpected(
-            "MSVC 19.34 / VS 2022 17.4 or newer is required for CMake C++ modules support");
+            "MSVC 19.34 / VS 2022 17.4 or newer is required for CMake C++ "
+            "modules support");
       }
       info.configure_args.push_back("-DCMAKE_CXX_SCAN_FOR_MODULES=ON");
       return info;
 
     case ToolchainFamily::Unknown:
       return std::unexpected(
-          "Unable to classify the active C++ compiler for CMake modules support");
+          "Unable to classify the active C++ compiler for CMake modules "
+          "support");
   }
 
   return std::unexpected("Unhandled toolchain family");
