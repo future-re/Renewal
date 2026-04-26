@@ -1,11 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
-
-project(Renewal VERSION 0.1.0 LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
+# Add library for core functionality
 add_library(renewal_core
   build.cpp
   create_new.cpp
@@ -16,11 +9,17 @@ add_library(renewal_core
   validator.cpp
   workspace.cpp
 )
-target_include_directories(renewal_core PUBLIC ${CMAKE_SOURCE_DIR}/../include)
 
+# Specify include directories for the library
+target_include_directories(renewal_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for the main application
 add_executable(renewal main.cpp)
+
+# Link the core library to the executable
 target_link_libraries(renewal PRIVATE renewal_core)
-target_include_directories(renewal PRIVATE ${CMAKE_SOURCE_DIR}/../include)
+
+target_link_libraries(renewal_core PUBLIC re2::re2)
 
 install(TARGETS renewal_core
   LIBRARY DESTINATION lib
@@ -32,6 +31,6 @@ install(TARGETS renewal
   RUNTIME DESTINATION bin
 )
 
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/../include/renewal
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/renewal
   DESTINATION include
 )
