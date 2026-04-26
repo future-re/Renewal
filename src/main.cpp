@@ -17,7 +17,8 @@ void print_usage() {
             << std::endl;
   std::cerr << "  build      Validate, generate, configure, and build"
             << std::endl;
-  std::cerr << "  new        Create a new package directory" << std::endl;
+  std::cerr << "  new        Create a new package in [path] or current directory"
+            << std::endl;
 }
 
 int handle_validate(const std::filesystem::path& path) {
@@ -88,19 +89,16 @@ int handle_build(const std::filesystem::path& path) {
 }
 
 int handle_new(int argc, char** argv) {
-  if (argc < 3) {
-    std::cerr << "Usage: renewal new <path>" << std::endl;
-    return 2;
-  }
+  const std::filesystem::path path = resolve_path_argument(
+      argc, argv, std::filesystem::current_path());
 
-  auto result = renewal::create_new(argv[2]);
+  auto result = renewal::create_new(path);
   if (!result) {
     std::cerr << result.error() << std::endl;
     return 1;
   }
 
-  std::cout << "Created package at " << std::filesystem::path(argv[2]).string()
-            << std::endl;
+  std::cout << "Created package at " << path.string() << std::endl;
   return 0;
 }
 

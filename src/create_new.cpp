@@ -17,6 +17,10 @@ std::string render_template(std::string_view tmpl, const std::string& name) {
   return utils::replace_all(std::string(tmpl), "{{name}}", name);
 }
 
+bool has_conflict(const fs::path& path) {
+  return fs::exists(path);
+}
+
 }  // namespace
 
 std::expected<void, std::string> create_new(const fs::path& root_path) {
@@ -30,9 +34,33 @@ std::expected<void, std::string> create_new(const fs::path& root_path) {
     return std::unexpected("Package path must include a directory name");
   }
 
-  if (fs::exists(package_root)) {
-    return std::unexpected("Directory already exists: " +
+  const bool package_root_exists = fs::exists(package_root);
+  if (package_root_exists && !fs::is_directory(package_root)) {
+    return std::unexpected("Path exists and is not a directory: " +
                            package_root.string());
+  }
+
+  if (package_root_exists) {
+    if (has_conflict(package_root / "pkg.toml")) {
+      return std::unexpected("pkg.toml already exists in: " +
+                             package_root.string());
+    }
+    if (has_conflict(package_root / "modules" / package_name / "mod.cppm")) {
+      return std::unexpected("Module file already exists in: " +
+                             (package_root / "modules" / package_name /
+                              "mod.cppm")
+                                 .string());
+    }
+    if (has_conflict(package_root / "modules" / package_name / "hello.cpp")) {
+      return std::unexpected("Implementation file already exists in: " +
+                             (package_root / "modules" / package_name /
+                              "hello.cpp")
+                                 .string());
+    }
+    if (has_conflict(package_root / "tests" / "main.cpp")) {
+      return std::unexpected("Test file already exists in: " +
+                             (package_root / "tests" / "main.cpp").string());
+    }
   }
 
   try {
