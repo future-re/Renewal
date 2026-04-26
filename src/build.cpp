@@ -7,6 +7,7 @@
 #include <string>
 
 #include "renewal/generator.hpp"
+#include "renewal/toolchain.hpp"
 
 namespace renewal {
 
@@ -35,15 +36,22 @@ bool command_available(const std::string& command) {
   return std::system(probe.c_str()) == 0;
 }
 
-std::string configure_command_for(const GeneratedLayout& layout) {
+std::string configure_command_for(const GeneratedLayout& layout,
+                                  const ToolchainInfo& toolchain) {
   std::ostringstream command;
   command << "cmake -S " << shell_quote(layout.cmake_source_dir) << " -B "
           << shell_quote(layout.build_dir);
 
   const char* configured_generator = std::getenv("CMAKE_GENERATOR");
   if ((!configured_generator || *configured_generator == '\0') &&
+      toolchain.preferred_generator &&
+      *toolchain.preferred_generator == "Ninja" &&
       command_available("ninja --version")) {
     command << " -G Ninja";
+  }
+
+  for (const auto& arg : toolchain.configure_args) {
+    command << " " << shell_quote(arg);
   }
 
   return command.str();
@@ -57,10 +65,15 @@ std::string build_command_for(const GeneratedLayout& layout) {
 
 }  // namespace
 
-std::expected<GeneratedLayout, std::string> build_project(
+std::expected<BuildResult, std::string> build_project(
     const fs::path& root_path) {
   if (!command_available("cmake --version")) {
     return std::unexpected("cmake executable not found in PATH");
+  }
+
+  auto toolchain = detect_toolchain();
+  if (!toolchain) {
+    return std::unexpected(toolchain.error());
   }
 
   auto layout = write_generated_project(root_path);
@@ -68,7 +81,8 @@ std::expected<GeneratedLayout, std::string> build_project(
     return std::unexpected(layout.error());
   }
 
-  const std::string configure_command = configure_command_for(*layout);
+  const std::string configure_command =
+      configure_command_for(*layout, *toolchain);
   if (std::system(configure_command.c_str()) != 0) {
     return std::unexpected("CMake configure failed: " + configure_command);
   }
@@ -78,7 +92,7 @@ std::expected<GeneratedLayout, std::string> build_project(
     return std::unexpected("CMake build failed: " + build_command);
   }
 
-  return *layout;
+  return BuildResult{*layout, *toolchain};
 }
 
 }  // namespace renewal

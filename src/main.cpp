@@ -82,7 +82,8 @@ int handle_build(const std::filesystem::path& path) {
     return 1;
   }
 
-  std::cout << "Build completed in " << result->build_dir << std::endl;
+  std::cout << renewal::format_toolchain_report(result->toolchain);
+  std::cout << "Build completed in " << result->layout.build_dir << std::endl;
   return 0;
 }
 

@@ -11,6 +11,7 @@ add_library(renewal_core
   create_new.cpp
   generator.cpp
   manifest_parser.cpp
+  toolchain.cpp
   utils.cpp
   validator.cpp
   workspace.cpp
