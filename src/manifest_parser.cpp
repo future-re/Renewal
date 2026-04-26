@@ -3,6 +3,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -30,6 +31,7 @@ std::optional<std::string> parse_string(const std::string& value,
                            manifest_path});
     return std::nullopt;
   }
+
   return value.substr(1, value.size() - 2);
 }
 
@@ -44,7 +46,7 @@ std::optional<std::vector<std::string>> parse_string_array(
   }
 
   std::vector<std::string> result;
-  std::string inner = utils::trim(value.substr(1, value.size() - 2));
+  const std::string inner = utils::trim(value.substr(1, value.size() - 2));
   if (inner.empty()) {
     return result;
   }
@@ -116,8 +118,8 @@ std::optional<DependencySpec> parse_dependency(
   }
 
   if (value.size() >= 2 && value.front() == '{' && value.back() == '}') {
-    std::string inner = utils::trim(value.substr(1, value.size() - 2));
-    std::size_t equals = inner.find('=');
+    const std::string inner = utils::trim(value.substr(1, value.size() - 2));
+    const std::size_t equals = inner.find('=');
     if (equals == std::string::npos) {
       diagnostics.push_back(
           {DiagnosticSeverity::Error,
@@ -125,8 +127,8 @@ std::optional<DependencySpec> parse_dependency(
       return std::nullopt;
     }
 
-    std::string inline_key = utils::trim(inner.substr(0, equals));
-    std::string inline_value = utils::trim(inner.substr(equals + 1));
+    const std::string inline_key = utils::trim(inner.substr(0, equals));
+    const std::string inline_value = utils::trim(inner.substr(equals + 1));
     if (inline_key != "path") {
       diagnostics.push_back(
           {DiagnosticSeverity::Error,
@@ -219,8 +221,8 @@ bool assign_build_field(PackageManifest& manifest, const std::string& key,
 void add_required_field_diagnostics(const PackageManifest& manifest,
                                     std::vector<Diagnostic>& diagnostics,
                                     const fs& manifest_path) {
-  auto require_string = [&](const std::optional<std::string>& field,
-                            const std::string& name) {
+  const auto require_string = [&](const std::optional<std::string>& field,
+                                  const std::string& name) {
     if (!field || field->empty()) {
       diagnostics.push_back({DiagnosticSeverity::Error,
                              "Missing required field '" + name + "'",
@@ -233,6 +235,30 @@ void add_required_field_diagnostics(const PackageManifest& manifest,
   require_string(manifest.package.edition, "package.edition");
   require_string(manifest.build.target, "build.target");
   require_string(manifest.build.type, "build.type");
+}
+
+std::string consume_multiline_value(std::ifstream& input, std::string initial,
+                                    int& line_number) {
+  if (initial.empty() || initial.front() != '[' || initial.back() == ']') {
+    return initial;
+  }
+
+  std::ostringstream continued;
+  continued << initial;
+
+  std::string line;
+  while (std::getline(input, line)) {
+    ++line_number;
+    const std::string next = utils::trim(utils::strip_comment(line));
+    if (!next.empty()) {
+      continued << ' ' << next;
+    }
+    if (!next.empty() && next.back() == ']') {
+      break;
+    }
+  }
+
+  return continued.str();
 }
 
 }  // namespace
@@ -248,8 +274,8 @@ ManifestParseResult parse_manifest(const std::filesystem::path& manifest_path) {
     return result;
   }
 
-  std::unordered_set<std::string> allowed_sections = {"package", "deps",
-                                                      "build", "metadata"};
+  const std::unordered_set<std::string> allowed_sections = {"package", "deps",
+                                                            "build", "metadata"};
   std::string section;
   std::string line;
   int line_number = 0;
@@ -280,7 +306,7 @@ ManifestParseResult parse_manifest(const std::filesystem::path& manifest_path) {
       continue;
     }
 
-    std::size_t equals = current.find('=');
+    const std::size_t equals = current.find('=');
     if (equals == std::string::npos) {
       result.diagnostics.push_back(
           {DiagnosticSeverity::Error,
@@ -289,24 +315,9 @@ ManifestParseResult parse_manifest(const std::filesystem::path& manifest_path) {
       continue;
     }
 
-    std::string key = utils::trim(current.substr(0, equals));
+    const std::string key = utils::trim(current.substr(0, equals));
     std::string value = utils::trim(current.substr(equals + 1));
-
-    if (!value.empty() && value.front() == '[' && value.back() != ']') {
-      std::ostringstream continued;
-      continued << value;
-      while (std::getline(input, line)) {
-        ++line_number;
-        std::string next = utils::trim(utils::strip_comment(line));
-        if (!next.empty()) {
-          continued << ' ' << next;
-        }
-        if (!next.empty() && next.back() == ']') {
-          break;
-        }
-      }
-      value = continued.str();
-    }
+    value = consume_multiline_value(input, value, line_number);
 
     if (section == "package") {
       assign_package_field(result.manifest, key, value, result.diagnostics,

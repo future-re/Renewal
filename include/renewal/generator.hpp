@@ -6,7 +6,7 @@
 
 namespace renewal {
 
-std::expected<void, std::string> create_new(
+std::expected<std::string, std::string> generate_cmake(
     const std::filesystem::path& root_path);
 
 }

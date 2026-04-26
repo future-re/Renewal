@@ -1,12 +1,12 @@
 #pragma once
-#include <string>
 #include <filesystem>
+#include <string>
 
 namespace renewal {
 namespace utils {
 
 namespace fs = std::filesystem;
-std::string render_template(const fs::path& tmpl_path, const std::string& name);
+std::string read_file(const fs::path& path);
 void write_file(const fs::path& path, const std::string& content);
 std::string replace_all(std::string str, const std::string& from,
                         const std::string& to);

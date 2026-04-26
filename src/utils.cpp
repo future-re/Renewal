@@ -1,5 +1,8 @@
 #include "renewal/utils.hpp"
+
+#include <cctype>
 #include <fstream>
+#include <stdexcept>
 
 namespace renewal {
 namespace utils {
@@ -16,7 +19,14 @@ std::string read_file(const fs::path& path) {
 }
 
 void write_file(const fs::path& path, const std::string& content) {
-  std::ofstream(path) << content;
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error("Failed to write: " + path.string());
+  }
+  output << content;
+  if (!output) {
+    throw std::runtime_error("Failed to write: " + path.string());
+  }
 }
 
 std::string replace_all(std::string str, const std::string& from,

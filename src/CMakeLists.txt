@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(renewal_core
   create_new.cpp
+  generator.cpp
   manifest_parser.cpp
   utils.cpp
   validator.cpp

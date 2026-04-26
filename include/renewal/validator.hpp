@@ -12,6 +12,7 @@ namespace renewal {
 std::vector<Diagnostic> validate_package(
     const std::filesystem::path& package_root, const PackageManifest& manifest);
 
-std::expected<void, std::string> validator(std::filesystem::path package_root);
+std::expected<void, std::string> validator(
+    const std::filesystem::path& package_root);
 
 }  // namespace renewal

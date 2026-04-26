@@ -1,38 +1,31 @@
 #include "renewal/validator.hpp"
 
-#include <filesystem>
+#include <algorithm>
 #include <expected>
-#include <fstream>
+#include <filesystem>
 #include <iostream>
+#include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
+
 #include "renewal/manifest_parser.hpp"
+#include "renewal/utils.hpp"
 
 namespace renewal {
 
+namespace fs = std::filesystem;
+
 namespace {
 
-std::string read_file(const std::filesystem::path& path) {
-  std::ifstream input(path);
-  if (!input) {
-    return {};
-  }
-
-  std::ostringstream stream;
-  stream << input.rdbuf();
-  return stream.str();
-}
-
-std::string trim(const std::string& input) {
-  std::size_t begin = input.find_first_not_of(" \t\r\n");
-  if (begin == std::string::npos) {
-    return "";
-  }
-  std::size_t end = input.find_last_not_of(" \t\r\n");
-  return input.substr(begin, end - begin + 1);
-}
+struct PackageBundle {
+  fs::path root;
+  PackageManifest manifest;
+};
 
 bool is_valid_package_name(const std::string& name) {
   static const std::regex pattern("^[A-Za-z0-9_-]+$");
@@ -45,11 +38,176 @@ bool is_valid_semver(const std::string& version) {
 }
 
 std::string dependency_key_from_import(const std::string& imported) {
-  std::size_t pos = imported.find_first_of(".:");
+  if (imported.empty() || imported.front() == ':') {
+    return "";
+  }
+
+  const std::size_t pos = imported.find_first_of(".:");
   if (pos == std::string::npos) {
     return imported;
   }
   return imported.substr(0, pos);
+}
+
+std::vector<fs::path> collect_manifests(const fs::path& root_path) {
+  std::vector<fs::path> manifests;
+  const fs::path root_manifest = root_path / "pkg.toml";
+  if (fs::exists(root_manifest)) {
+    manifests.push_back(root_manifest);
+  }
+
+  if (!fs::exists(root_path) || !fs::is_directory(root_path)) {
+    return manifests;
+  }
+
+  for (const auto& entry : fs::recursive_directory_iterator(root_path)) {
+    if (!entry.is_regular_file() || entry.path().filename() != "pkg.toml") {
+      continue;
+    }
+    if (entry.path() == root_manifest) {
+      continue;
+    }
+    manifests.push_back(entry.path());
+  }
+
+  std::sort(manifests.begin(), manifests.end());
+  manifests.erase(std::unique(manifests.begin(), manifests.end()),
+                  manifests.end());
+  return manifests;
+}
+
+std::vector<fs::path> collect_module_interfaces(
+    const fs::path& package_root, const std::string& package_name) {
+  std::vector<fs::path> files;
+  const fs::path module_root = package_root / "modules" / package_name;
+  if (!fs::exists(module_root)) {
+    return files;
+  }
+
+  for (const auto& entry : fs::recursive_directory_iterator(module_root)) {
+    if (entry.is_regular_file() && entry.path().extension() == ".cppm") {
+      files.push_back(entry.path());
+    }
+  }
+
+  std::sort(files.begin(), files.end());
+  return files;
+}
+
+std::vector<fs::path> collect_sources_to_scan(const fs::path& package_root,
+                                              const PackageManifest& manifest) {
+  std::vector<fs::path> files;
+  if (!manifest.package.name) {
+    return files;
+  }
+
+  auto interfaces =
+      collect_module_interfaces(package_root, *manifest.package.name);
+  files.insert(files.end(), interfaces.begin(), interfaces.end());
+
+  for (const auto& source : manifest.build.sources) {
+    files.push_back(package_root / source);
+  }
+
+  std::sort(files.begin(), files.end());
+  files.erase(std::unique(files.begin(), files.end()), files.end());
+  return files;
+}
+
+std::vector<std::string> collect_imports(const std::string& source) {
+  std::vector<std::string> imports;
+  static const std::regex import_pattern(
+      R"(\bimport\s+([:<"][^;]+|[A-Za-z_][A-Za-z0-9_.:-]*)\s*;)");
+
+  for (std::sregex_iterator it(source.begin(), source.end(), import_pattern),
+       end;
+       it != end; ++it) {
+    imports.push_back(utils::trim((*it)[1].str()));
+  }
+
+  return imports;
+}
+
+void print_diagnostics(const std::vector<Diagnostic>& diagnostics) {
+  for (const auto& diagnostic : diagnostics) {
+    std::cerr << (diagnostic.severity == DiagnosticSeverity::Error ? "error"
+                                                                   : "warning");
+    if (!diagnostic.path.empty()) {
+      std::cerr << ": " << diagnostic.path.string();
+    }
+    std::cerr << ": " << diagnostic.message << std::endl;
+  }
+}
+
+void append(std::vector<Diagnostic>& target,
+            const std::vector<Diagnostic>& source) {
+  target.insert(target.end(), source.begin(), source.end());
+}
+
+std::optional<std::string> detect_cycle(
+    const std::unordered_map<std::string, std::set<std::string>>& graph) {
+  enum class VisitState {
+    Unvisited,
+    Visiting,
+    Done,
+  };
+
+  std::unordered_map<std::string, VisitState> states;
+  std::vector<std::string> stack;
+
+  std::function<std::optional<std::string>(const std::string&)> dfs =
+      [&](const std::string& node) -> std::optional<std::string> {
+    states[node] = VisitState::Visiting;
+    stack.push_back(node);
+
+    auto graph_it = graph.find(node);
+    if (graph_it != graph.end()) {
+      for (const auto& next : graph_it->second) {
+        if (states[next] == VisitState::Visiting) {
+          std::ostringstream cycle;
+          auto begin = std::find(stack.begin(), stack.end(), next);
+          for (auto it = begin; it != stack.end(); ++it) {
+            if (it != begin) {
+              cycle << " -> ";
+            }
+            cycle << *it;
+          }
+          cycle << " -> " << next;
+          return cycle.str();
+        }
+
+        if (states[next] == VisitState::Unvisited) {
+          auto result = dfs(next);
+          if (result) {
+            return result;
+          }
+        }
+      }
+    }
+
+    stack.pop_back();
+    states[node] = VisitState::Done;
+    return std::nullopt;
+  };
+
+  std::vector<std::string> nodes;
+  nodes.reserve(graph.size());
+  for (const auto& [node, _] : graph) {
+    nodes.push_back(node);
+  }
+  std::sort(nodes.begin(), nodes.end());
+
+  for (const auto& node : nodes) {
+    if (states[node] != VisitState::Unvisited) {
+      continue;
+    }
+    auto cycle = dfs(node);
+    if (cycle) {
+      return cycle;
+    }
+  }
+
+  return std::nullopt;
 }
 
 }  // namespace
@@ -58,19 +216,20 @@ std::vector<Diagnostic> validate_package(
     const std::filesystem::path& package_root,
     const PackageManifest& manifest) {
   std::vector<Diagnostic> diagnostics;
+  const fs::path manifest_path = package_root / "pkg.toml";
 
   if (manifest.package.name && !manifest.package.name->empty() &&
       !is_valid_package_name(*manifest.package.name)) {
     diagnostics.push_back({DiagnosticSeverity::Error,
                            "package.name may only contain [A-Za-z0-9_-]",
-                           package_root / "pkg.toml"});
+                           manifest_path});
   }
 
   if (manifest.package.version && !manifest.package.version->empty() &&
       !is_valid_semver(*manifest.package.version)) {
     diagnostics.push_back({DiagnosticSeverity::Error,
                            "package.version must match MAJOR.MINOR.PATCH",
-                           package_root / "pkg.toml"});
+                           manifest_path});
   }
 
   if (manifest.package.edition && !manifest.package.edition->empty()) {
@@ -80,7 +239,7 @@ std::vector<Diagnostic> validate_package(
       diagnostics.push_back(
           {DiagnosticSeverity::Error,
            "package.edition must be one of c++20, c++23, c++26",
-           package_root / "pkg.toml"});
+           manifest_path});
     }
   }
 
@@ -88,30 +247,47 @@ std::vector<Diagnostic> validate_package(
       *manifest.build.type != "module_library") {
     diagnostics.push_back({DiagnosticSeverity::Error,
                            "build.type must be 'module_library'",
-                           package_root / "pkg.toml"});
+                           manifest_path});
   }
 
   for (const auto& [name, dep] : manifest.deps) {
+    if (dep.kind == DependencyKind::Version && !is_valid_semver(dep.value)) {
+      diagnostics.push_back(
+          {DiagnosticSeverity::Error,
+           "Dependency '" + name + "' version must match MAJOR.MINOR.PATCH",
+           manifest_path});
+    }
+
     if (dep.kind != DependencyKind::Path) {
       continue;
     }
 
-    std::filesystem::path dep_path(dep.value);
+    const fs::path dep_path(dep.value);
     if (dep_path.is_absolute()) {
       diagnostics.push_back({DiagnosticSeverity::Error,
                              "Dependency '" + name + "' path must be relative",
-                             package_root / "pkg.toml"});
+                             manifest_path});
       continue;
     }
 
-    std::filesystem::path target_manifest =
-        package_root / dep_path / "pkg.toml";
-    if (!std::filesystem::exists(target_manifest)) {
+    const fs::path dep_manifest = package_root / dep_path / "pkg.toml";
+    if (!fs::exists(dep_manifest)) {
       diagnostics.push_back(
           {DiagnosticSeverity::Error,
            "Dependency '" + name +
                "' path must point to a package root containing pkg.toml",
-           package_root / "pkg.toml"});
+           manifest_path});
+      continue;
+    }
+
+    auto dep_parse_result = parse_manifest(dep_manifest);
+    if (dep_parse_result.ok() && dep_parse_result.manifest.package.name &&
+        *dep_parse_result.manifest.package.name != name) {
+      diagnostics.push_back({DiagnosticSeverity::Error,
+                             "Dependency key '" + name +
+                                 "' must match target package name '" +
+                                 *dep_parse_result.manifest.package.name + "'",
+                             manifest_path});
     }
   }
 
@@ -119,96 +295,194 @@ std::vector<Diagnostic> validate_package(
     return diagnostics;
   }
 
-  std::filesystem::path module_path =
-      package_root / "modules" / *manifest.package.name / "mod.cppm";
-  if (!std::filesystem::exists(module_path)) {
+  const fs::path module_root = package_root / "modules" / *manifest.package.name;
+  const fs::path unified_module = module_root / "mod.cppm";
+  if (!fs::exists(unified_module)) {
     diagnostics.push_back(
         {DiagnosticSeverity::Error,
-         "Missing unified export module at " + module_path.string(),
-         module_path});
+         "Missing unified export module at " + unified_module.string(),
+         unified_module});
     return diagnostics;
   }
 
-  std::string module_source = read_file(module_path);
-  if (module_source.empty()) {
+  const auto module_interfaces =
+      collect_module_interfaces(package_root, *manifest.package.name);
+  if (module_interfaces.empty()) {
     diagnostics.push_back(
         {DiagnosticSeverity::Error,
-         "Failed to read module file: " + module_path.string(), module_path});
-    return diagnostics;
+         "Package must contain at least one module interface unit",
+         module_root});
   }
 
+  for (const auto& source : manifest.build.sources) {
+    const fs::path source_path = package_root / source;
+    if (fs::path(source).is_absolute()) {
+      diagnostics.push_back({DiagnosticSeverity::Error,
+                             "build.sources entries must be relative paths",
+                             manifest_path});
+      continue;
+    }
+
+    if (!fs::exists(source_path)) {
+      diagnostics.push_back(
+          {DiagnosticSeverity::Error,
+           "build.sources entry does not exist: " + source, manifest_path});
+    }
+  }
+
+  const std::string unified_source = utils::read_file(unified_module);
   static const std::regex export_module_pattern(
       R"(export\s+module\s+([A-Za-z0-9_.:-]+)\s*;)");
   std::smatch export_match;
-  if (!std::regex_search(module_source, export_match, export_module_pattern)) {
+  if (!std::regex_search(unified_source, export_match, export_module_pattern)) {
     diagnostics.push_back(
         {DiagnosticSeverity::Error,
-         "mod.cppm must contain 'export module <package.name>;'", module_path});
-  } else if (trim(export_match[1].str()) != *manifest.package.name) {
+         "mod.cppm must contain 'export module <package.name>;'",
+         unified_module});
+  } else if (utils::trim(export_match[1].str()) != *manifest.package.name) {
     diagnostics.push_back({DiagnosticSeverity::Error,
                            "export module declaration must match package.name",
-                           module_path});
+                           unified_module});
   }
 
-  static const std::regex import_pattern(
-      R"(\bimport\s+([A-Za-z_][A-Za-z0-9_.:-]*)\s*;)");
-  for (std::sregex_iterator
-           it(module_source.begin(), module_source.end(), import_pattern),
-       end;
-       it != end; ++it) {
-    std::string imported = (*it)[1].str();
-    if (imported == "std") {
+  for (const auto& file : collect_sources_to_scan(package_root, manifest)) {
+    if (!fs::exists(file)) {
       continue;
     }
 
-    std::string dep_name = dependency_key_from_import(imported);
-    if (dep_name.empty() || dep_name == *manifest.package.name) {
-      continue;
-    }
+    const std::string source = utils::read_file(file);
+    for (const auto& imported : collect_imports(source)) {
+      if (!imported.empty() &&
+          (imported.front() == '"' || imported.front() == '<')) {
+        diagnostics.push_back({DiagnosticSeverity::Error,
+                               "Header units are forbidden in v0.1",
+                               file});
+        continue;
+      }
 
-    if (!manifest.deps.count(dep_name)) {
-      diagnostics.push_back({DiagnosticSeverity::Error,
-                             "Module import '" + imported +
-                                 "' is not declared in [deps] as package '" +
-                                 dep_name + "'",
-                             module_path});
+      if (imported == "std") {
+        diagnostics.push_back({DiagnosticSeverity::Error,
+                               "import std is forbidden in v0.1", file});
+        continue;
+      }
+
+      const std::string dep_name = dependency_key_from_import(imported);
+      if (dep_name.empty() || dep_name == *manifest.package.name) {
+        continue;
+      }
+
+      if (!manifest.deps.count(dep_name)) {
+        diagnostics.push_back({DiagnosticSeverity::Error,
+                               "Module import '" + imported +
+                                   "' is not declared in [deps] as package '" +
+                                   dep_name + "'",
+                               file});
+      }
     }
   }
 
   return diagnostics;
 }
 
-void print_diagnostics(const std::vector<renewal::Diagnostic>& diagnostics) {
-  for (const auto& diagnostic : diagnostics) {
-    std::cerr << "error";
-    if (!diagnostic.path.empty()) {
-      std::cerr << ": " << diagnostic.path.string();
+std::expected<void, std::string> validator(const fs::path& package_root) {
+  if (!fs::exists(package_root)) {
+    return std::unexpected("Path not found: " + package_root.string());
+  }
+
+  const auto manifest_paths = collect_manifests(package_root);
+  if (manifest_paths.empty()) {
+    return std::unexpected("No pkg.toml found under: " + package_root.string());
+  }
+
+  std::vector<Diagnostic> diagnostics;
+  std::vector<PackageBundle> packages;
+  packages.reserve(manifest_paths.size());
+
+  for (const auto& manifest_path : manifest_paths) {
+    auto parse_result = parse_manifest(manifest_path);
+    append(diagnostics, parse_result.diagnostics);
+    packages.push_back({fs::absolute(manifest_path.parent_path()),
+                        parse_result.manifest});
+  }
+
+  for (const auto& package : packages) {
+    append(diagnostics, validate_package(package.root, package.manifest));
+  }
+
+  std::unordered_map<std::string, fs::path> package_names;
+  std::unordered_map<std::string, fs::path> target_names;
+  std::unordered_map<std::string, std::set<std::string>> dependency_graph;
+
+  for (const auto& package : packages) {
+    if (package.manifest.package.name) {
+      const auto [it, inserted] =
+          package_names.emplace(*package.manifest.package.name, package.root);
+      if (!inserted) {
+        diagnostics.push_back(
+            {DiagnosticSeverity::Error,
+             "Duplicate package.name '" + *package.manifest.package.name +
+                 "' found in workspace",
+             package.root / "pkg.toml"});
+        diagnostics.push_back(
+            {DiagnosticSeverity::Error,
+             "First package.name '" + *package.manifest.package.name +
+                 "' defined here",
+             it->second / "pkg.toml"});
+      }
     }
-    std::cerr << ": " << diagnostic.message << std::endl;
+
+    if (package.manifest.build.target) {
+      const auto [it, inserted] =
+          target_names.emplace(*package.manifest.build.target, package.root);
+      if (!inserted) {
+        diagnostics.push_back(
+            {DiagnosticSeverity::Error,
+             "Duplicate build.target '" + *package.manifest.build.target +
+                 "' found in workspace",
+             package.root / "pkg.toml"});
+        diagnostics.push_back(
+            {DiagnosticSeverity::Error,
+             "First build.target '" + *package.manifest.build.target +
+                 "' defined here",
+             it->second / "pkg.toml"});
+      }
+    }
   }
-}
 
-std::expected<void, std::string> validator(std::filesystem::path package_root) {
-  std::filesystem::path manifest_path = package_root / "pkg.toml";
+  for (const auto& package : packages) {
+    if (!package.manifest.package.name) {
+      continue;
+    }
 
-  if (!std::filesystem::exists(package_root)) {
-    return std::unexpected("Package root not found: " + package_root.string());
+    auto& edges = dependency_graph[*package.manifest.package.name];
+    for (const auto& [dep_name, dep] : package.manifest.deps) {
+      if (dep.kind == DependencyKind::Path) {
+        const fs::path dep_manifest = package.root / dep.value / "pkg.toml";
+        auto parse_result = parse_manifest(dep_manifest);
+        if (parse_result.ok() && parse_result.manifest.package.name) {
+          edges.insert(*parse_result.manifest.package.name);
+          continue;
+        }
+      }
+
+      if (package_names.count(dep_name)) {
+        edges.insert(dep_name);
+      }
+    }
   }
 
-  if (!std::filesystem::exists(manifest_path)) {
-    return std::unexpected("Manifest not found: " + manifest_path.string());
+  if (auto cycle = detect_cycle(dependency_graph)) {
+    diagnostics.push_back(
+        {DiagnosticSeverity::Error,
+         "Cyclic package dependency detected: " + *cycle, package_root});
   }
 
-  auto parse_result = renewal::parse_manifest(manifest_path);
-  if (!parse_result.ok()) {
-    print_diagnostics(parse_result.diagnostics);
-  }
-
-  auto diagnostics = renewal::validate_package(
-      std::filesystem::absolute(package_root), parse_result.manifest);
   if (!diagnostics.empty()) {
     print_diagnostics(diagnostics);
+    return std::unexpected("Validation failed");
   }
+
   return {};
 }
+
 }  // namespace renewal

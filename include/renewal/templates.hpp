@@ -4,28 +4,46 @@
 namespace renewal {
 namespace templates {
 
-inline constexpr std::string_view pkg_toml = R"(name = "{{name}}"
+inline constexpr std::string_view pkg_toml = R"([package]
+name = "{{name}}"
 version = "0.1.0"
+edition = "c++23"
 description = "A Renewal package {{name}}"
+
+[deps]
+
+[build]
+target = "pkg_{{name}}"
+type = "module_library"
+sources = [
+  "modules/{{name}}/hello.cpp"
+]
+
+[metadata]
 )";
 
 inline constexpr std::string_view mod_cppm = R"(export module {{name}};
 
-// module implementation for {{name}}
-)";
-
-inline constexpr std::string_view hello_cpp = R"(#include <iostream>
-
-void {{name}}::hello() {
-    std::cout << "Hello from Renewal module {{name}}!" << std::endl;
+export namespace {{name}} {
+const char* hello();
 }
 )";
 
-inline constexpr std::string_view main_cpp = R"(#include <iostream>
+inline constexpr std::string_view hello_cpp = R"(module {{name}};
+
+namespace {{name}} {
+
+const char* hello() {
+  return "Hello from Renewal module {{name}}!";
+}
+
+}
+)";
+
+inline constexpr std::string_view main_cpp = R"(import {{name}};
 
 int main() {
-    std::cout << "Hello from tests for {{name}}" << std::endl;
-    return 0;
+  return {{name}}::hello()[0] == '\0';
 }
 )";
 
