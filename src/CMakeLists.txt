@@ -7,11 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(renewal_core
+  build.cpp
   create_new.cpp
   generator.cpp
   manifest_parser.cpp
   utils.cpp
   validator.cpp
+  workspace.cpp
 )
 target_include_directories(renewal_core PUBLIC ${CMAKE_SOURCE_DIR}/../include)
 

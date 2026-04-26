@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <regex>
@@ -15,6 +16,7 @@
 
 #include "renewal/manifest_parser.hpp"
 #include "renewal/utils.hpp"
+#include "renewal/workspace.hpp"
 
 namespace renewal {
 
@@ -47,51 +49,6 @@ std::string dependency_key_from_import(const std::string& imported) {
     return imported;
   }
   return imported.substr(0, pos);
-}
-
-std::vector<fs::path> collect_manifests(const fs::path& root_path) {
-  std::vector<fs::path> manifests;
-  const fs::path root_manifest = root_path / "pkg.toml";
-  if (fs::exists(root_manifest)) {
-    manifests.push_back(root_manifest);
-  }
-
-  if (!fs::exists(root_path) || !fs::is_directory(root_path)) {
-    return manifests;
-  }
-
-  for (const auto& entry : fs::recursive_directory_iterator(root_path)) {
-    if (!entry.is_regular_file() || entry.path().filename() != "pkg.toml") {
-      continue;
-    }
-    if (entry.path() == root_manifest) {
-      continue;
-    }
-    manifests.push_back(entry.path());
-  }
-
-  std::sort(manifests.begin(), manifests.end());
-  manifests.erase(std::unique(manifests.begin(), manifests.end()),
-                  manifests.end());
-  return manifests;
-}
-
-std::vector<fs::path> collect_module_interfaces(
-    const fs::path& package_root, const std::string& package_name) {
-  std::vector<fs::path> files;
-  const fs::path module_root = package_root / "modules" / package_name;
-  if (!fs::exists(module_root)) {
-    return files;
-  }
-
-  for (const auto& entry : fs::recursive_directory_iterator(module_root)) {
-    if (entry.is_regular_file() && entry.path().extension() == ".cppm") {
-      files.push_back(entry.path());
-    }
-  }
-
-  std::sort(files.begin(), files.end());
-  return files;
 }
 
 std::vector<fs::path> collect_sources_to_scan(const fs::path& package_root,
@@ -389,20 +346,17 @@ std::expected<void, std::string> validator(const fs::path& package_root) {
     return std::unexpected("Path not found: " + package_root.string());
   }
 
-  const auto manifest_paths = collect_manifests(package_root);
-  if (manifest_paths.empty()) {
+  const auto workspace_result = load_workspace(package_root);
+  if (workspace_result.workspace.packages.empty()) {
     return std::unexpected("No pkg.toml found under: " + package_root.string());
   }
 
   std::vector<Diagnostic> diagnostics;
+  append(diagnostics, workspace_result.diagnostics);
   std::vector<PackageBundle> packages;
-  packages.reserve(manifest_paths.size());
-
-  for (const auto& manifest_path : manifest_paths) {
-    auto parse_result = parse_manifest(manifest_path);
-    append(diagnostics, parse_result.diagnostics);
-    packages.push_back({fs::absolute(manifest_path.parent_path()),
-                        parse_result.manifest});
+  packages.reserve(workspace_result.workspace.packages.size());
+  for (const auto& package : workspace_result.workspace.packages) {
+    packages.push_back({package.root, package.manifest});
   }
 
   for (const auto& package : packages) {
